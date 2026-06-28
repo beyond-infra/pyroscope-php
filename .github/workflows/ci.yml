@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: phpswoole/swoole:6.2-php8.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: apt-get update && apt-get install -y libcurl4-openssl-dev autoconf gcc make
+      - name: Build extension
+        run: cd extension && phpize && ./configure --enable-pyroscope-php && make -j$(nproc)
+      - name: Install & verify
+        run: |
+          cp extension/modules/pyroscope_php.so $(php -r 'echo ini_get("extension_dir");')/
+          echo "extension=pyroscope_php.so" > /usr/local/etc/php/conf.d/pyroscope_php.ini
+          php -m | grep pyroscope_php
+      - name: Run tests
+        run: php tests/rigorous_test.php
+
+  simulation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build simulation (normal)
+        run: gcc -pthread -Wall -Werror -O2 -o tests/sim_bin tests/simulation.c
+      - name: Run deterministic simulation
+        run: |
+          for s in 1 42 12345 99999; do
+            tests/sim_bin --seed $s --fault-mode none || exit 1
+          done
+          tests/sim_bin --seed 42 --fault-mode full-buffer || exit 1
+
+  simulation-tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build simulation with TSan
+        run: gcc -pthread -fsanitize=thread -fno-omit-frame-pointer -g -O1 -o tests/sim_tsan tests/simulation.c
+      - name: Run under TSan
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+        run: tests/sim_tsan --seed 42 --fault-mode none
+
+  simulation-asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build simulation with ASan
+        run: gcc -pthread -fsanitize=address -fno-omit-frame-pointer -g -O1 -o tests/sim_asan tests/simulation.c
+      - name: Run under ASan
+        env:
+          ASAN_OPTIONS: "halt_on_error=1"
+        run: tests/sim_asan --seed 42 --fault-mode none
+
+  simulation-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build simulation with UBSan
+        run: gcc -pthread -fsanitize=undefined -fno-omit-frame-pointer -g -O1 -o tests/sim_ubsan tests/simulation.c
+      - name: Run under UBSan
+        env:
+          UBSAN_OPTIONS: "halt_on_error=1"
+        run: tests/sim_ubsan --seed 42 --fault-mode none
+
+  integration:
+    runs-on: ubuntu-latest
+    container:
+      image: phpswoole/swoole:6.2-php8.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: apt-get update && apt-get install -y libcurl4-openssl-dev autoconf gcc make
+      - name: Build extension
+        run: cd extension && phpize && ./configure --enable-pyroscope-php && make -j$(nproc)
+      - name: Install
+        run: |
+          cp extension/modules/pyroscope_php.so $(php -r 'echo ini_get("extension_dir");')/
+          echo "extension=pyroscope_php.so" > /usr/local/etc/php/conf.d/pyroscope_php.ini
+      - name: Push-mode integration test
+        run: |
+          PYROSCOPE_APP_NAME=ci-test PYROSCOPE_ENDPOINT=http://localhost:4040 PYROSCOPE_INTERVAL=1 \
+            php -r '
+            echo "push mode active\n";
+            for ($i = 0; $i < 10000; $i++) { sqrt(1.0); }
+            usleep(1500000);
+            echo "push test done\n";
+            '
+          echo "PASS: push-mode integration test"
+
+  tla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install TLA+ tools
+        run: |
+          wget -q https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
+            -O /tmp/tla2tools.jar
+      - name: Run TLC model checker
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock tla/PyroscopeBuffer.tla
+
+  pprof-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Build and run pprof tests
+        run: make test-pprof
+
+  valgrind:
+    runs-on: ubuntu-latest
+    container:
+      image: phpswoole/swoole:6.2-php8.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: apt-get update && apt-get install -y libcurl4-openssl-dev autoconf gcc make valgrind
+      - name: Build extension
+        run: cd extension && phpize && ./configure --enable-pyroscope-php && make -j$(nproc)
+      - name: Install
+        run: |
+          cp extension/modules/pyroscope_php.so $(php -r 'echo ini_get("extension_dir");')/
+          echo "extension=pyroscope_php.so" > /usr/local/etc/php/conf.d/pyroscope_php.ini
+          php -m | grep pyroscope_php
+      - name: Valgrind memcheck
+        env:
+          PYROSCOPE_APP_NAME: valgrind-test
+          PYROSCOPE_ENDPOINT: http://localhost:4040
+          PYROSCOPE_INTERVAL: 1
+        run: |
+          valgrind --tool=memcheck --leak-check=full --error-exitcode=1 \
+            --suppressions=scripts/valgrind-php.supp \
+            php tests/rigorous_test.php
+
+  soak:
+    runs-on: ubuntu-latest
+    container:
+      image: phpswoole/swoole:6.2-php8.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: apt-get update && apt-get install -y libcurl4-openssl-dev autoconf gcc make golang-go
+      - name: Build extension
+        run: cd extension && phpize && ./configure --enable-pyroscope-php && make -j$(nproc) && make install && echo "extension=pyroscope_php.so" > /usr/local/etc/php/conf.d/pyroscope_php.ini
+      - name: Start mock receiver
+        run: go build -o /tmp/mock tests/pyroscope_mock.go && /tmp/mock &
+      - name: Run soak test
+        env:
+          PYROSCOPE_APP_NAME: soak-test
+          PYROSCOPE_ENDPOINT: http://localhost:4040
+          PYROSCOPE_INTERVAL: 1
+          SOAK_SECONDS: "60"
+        run: php tests/soak_test.php
+      - name: Validate delivery
+        run: |
+          if [ -f /tmp/pyroscope_mock.log ] && grep -q 'BODY_LEN' /tmp/pyroscope_mock.log; then
+            echo "PASS: mock received pprof data"
+          else
+            echo "FAIL: mock received no data" && exit 1
+          fi

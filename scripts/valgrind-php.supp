@@ -1,0 +1,27 @@
+# Valgrind suppressions for PHP/Zend engine false positives.
+# These are standard across PHP extension projects — Zend's
+# custom memory manager and startup routines trigger known
+# false positives that are not extension bugs.
+#
+# Only suppress if the stack trace is entirely in Zend/PHP core,
+# never suppress pyroscope_php.c frames.
+
+{
+   Zend-MM-startup-reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/php
+   obj:*/php8.*
+   obj:*/libphp*.so
+}
+
+{
+   Zend-MM-startup-possible
+   Memcheck:Leak
+   match-leak-kinds: possible
+   ...
+   obj:*/php
+   obj:*/php8.*
+   obj:*/libphp*.so
+}

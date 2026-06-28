@@ -1,0 +1,15 @@
+extension/Makefile
+extension/Makefile.fragments
+extension/Makefile.objects
+extension/config.log
+extension/config.status
+extension/config.h*
+extension/configure.ac
+extension/*.lo
+extension/*.la
+extension/*.dep
+extension/*.o
+extension/modules/
+extension/.libs/
+extension/autom4te.cache/
+extension/build/
