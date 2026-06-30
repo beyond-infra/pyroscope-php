@@ -2,6 +2,8 @@
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "zend_compile.h"
+#include "zend_execute.h"
+#include "zend_globals.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -12,20 +14,25 @@
 #include <time.h>
 #include <curl/curl.h>
 
-static void (*orig_execute_ex)(zend_execute_data *execute_data);
-
 #define BUF_SIZE 65536
 #define MAX_DEPTH 128
 #define MAX_STACK_LEN 4096
 
 typedef char sample_t[MAX_STACK_LEN];
 
-static sample_t      *active_buf = NULL;
-static sample_t      *drain_buf  = NULL;
-static pthread_mutex_t buf_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint32_t        active_count;
+/* ponytail: SPSC ring — single producer (SIGVTALRM handler, fires only on the
+ * main thread because the push thread blocks all signals), single consumer
+ * (push thread). head: producer-only write; tail: consumer-only write.
+ * Unsigned wraparound arithmetic keeps (head - tail) correct across 2^32. */
+static sample_t        *g_ring = NULL;
+static uint32_t         g_head = 0;   /* atomic — next slot producer will write */
+static uint32_t         g_tail = 0;   /* atomic — next slot consumer will read  */
+/* Serializes the non-signal readers (push thread + PHP API funcs) against each
+ * other. The signal handler NEVER takes this — it only touches head + ring[]. */
+static pthread_mutex_t  g_drain_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int g_enabled = 1;
+static int   g_enabled = 1;
+static int   g_sample_us = 10000;   /* 10ms user-CPU sampling interval (phpspy default) */
 
 static char  *g_endpoint = NULL;
 static char  *g_app_name = NULL;
@@ -33,6 +40,9 @@ static int    g_interval = 10;
 
 static pthread_t g_push_thread;
 static int       g_push_stop = 0;
+
+static char             *g_sigstack = NULL;   /* sigaltstack — handler stack is large */
+static struct sigaction  g_old_sa;             /* saved SIGVTALRM action, restored on shutdown */
 
 static void walk_stack(zend_execute_data *ex, char *out, size_t out_sz) {
     /* Per frame we may emit up to 3 segments: [class][sep][funcname].
@@ -83,20 +93,59 @@ static void walk_stack(zend_execute_data *ex, char *out, size_t out_sz) {
     *p = '\0';
 }
 
-static void cp_execute_ex(zend_execute_data *execute_data) {
-    zend_function *f = EX(func);
-    /* ponytail: always run the original executor — frames without a function
-     * name (main script, include/eval) must still execute, only profiling is
-     * skipped. Returning early here used to swallow all top-level code. */
-    if (f && f->common.function_name && g_enabled) {
-        pthread_mutex_lock(&buf_mutex);
-        if (active_count < BUF_SIZE) {
-            walk_stack(execute_data, active_buf[active_count], MAX_STACK_LEN);
-            active_count++;
-        }
-        pthread_mutex_unlock(&buf_mutex);
+/* ── timer-based sampling (SIGVTALRM) ───────────────────────────────────
+ * Replaces the old zend_execute_ex hook. The hook only fired on function-call
+ * boundaries, so CPU-bound loops with no calls produced zero samples — a
+ * call-count profile masquerading as CPU time. A periodic SIGVTALRM samples
+ * whatever stack is currently executing, so time spent anywhere is captured.
+ *
+ * Signal-safety contract for sigvtalrm_handler:
+ *   - reads only the EG(current_execute_data) pointer chain (read-only walk)
+ *   - writes only pre-allocated g_ring memory via memcpy (async-signal-safe)
+ *   - uses __atomic builtins (lock-free, safe in a handler)
+ *   - NEVER calls malloc / emalloc / pthread_mutex_lock / zend API
+ *   - runs on a dedicated sigaltstack (walk_stack needs ~7KB of stack) */
+static void sigvtalrm_handler(int sig) {
+    (void)sig;
+    uint32_t h = __atomic_load_n(&g_head, __ATOMIC_RELAXED);
+    uint32_t t = __atomic_load_n(&g_tail, __ATOMIC_ACQUIRE);
+    if (h - t >= BUF_SIZE) return;   /* ring full — drop sample, same as before */
+    walk_stack(EG(current_execute_data), g_ring[h % BUF_SIZE], MAX_STACK_LEN);
+    __atomic_store_n(&g_head, h + 1, __ATOMIC_RELEASE);   /* publish the written slot */
+}
+
+static void sampling_start(void) {
+    if (g_sample_us <= 0) return;
+    struct itimerval it = {
+        .it_interval = { 0, g_sample_us },
+        .it_value    = { 0, g_sample_us },
+    };
+    setitimer(ITIMER_VIRTUAL, &it, NULL);   /* user-CPU time: ITIMER_VIRTUAL/SIGVTALRM is not used by PHP (SIGPROF, max_execution_time) or Swoole (SIGALRM, timer), so no clash. Counts user-mode CPU only, not kernel syscalls. */
+}
+
+static void sampling_stop(void) {
+    struct itimerval it = { {0, 0}, {0, 0} };
+    setitimer(ITIMER_VIRTUAL, &it, NULL);
+}
+
+/* Install SIGVTALRM handler on a private sigaltstack. itimer + sigaction do NOT
+ * survive fork(), so this is also called from push_atfork_child. */
+static void install_sampler(void) {
+    if (g_sigstack) {
+        stack_t ss = { .ss_sp = g_sigstack, .ss_size = (size_t)SIGSTKSZ * 4, .ss_flags = 0 };
+        sigaltstack(&ss, NULL);
     }
-    orig_execute_ex(execute_data);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigvtalrm_handler;
+    sa.sa_flags = SA_RESTART | SA_ONSTACK;   /* ONSTACK → run on sigaltstack (large) */
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGVTALRM, &sa, &g_old_sa);
+}
+
+static void uninstall_sampler(void) {
+    sampling_stop();
+    sigaction(SIGVTALRM, &g_old_sa, NULL);
 }
 
 /* ── protobuf wire encoder ─────────────────────────────────────────── */
@@ -257,8 +306,8 @@ static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
         pb_int(&pb, 2, values[i]);
     }
 
-    pb_int(&pb, 9, (int64_t)time(NULL) * 1000000000LL - INT64_C(10000000000));
-    pb_int(&pb, 10, INT64_C(10000000000));
+    pb_int(&pb, 9, (int64_t)time(NULL) * 1000000000LL - (int64_t)g_sample_us * 1000);
+    pb_int(&pb, 10, (int64_t)g_sample_us * 1000);   /* period = sampling interval (ns) */
     pb_uint(&pb, 14, 0);
     pb_str(&pb, 6, "", 0);
     for (int i = 0; i < sc; i++)
@@ -282,12 +331,16 @@ static int sample_cmp(const void *a, const void *b) {
 static uint32_t merge_cpu(sample_t *slice, uint32_t n, int64_t *out_values) {
     if (n == 0) return 0;
     qsort(slice, n, sizeof(sample_t), sample_cmp);
+    /* Each timer sample represents g_sample_us microseconds of wall time.
+     * value = sample_count × period, so totals are real nanoseconds and
+     * Pyroscope's value/period math gives correct per-stack share. */
+    int64_t per = (int64_t)g_sample_us * 1000;
     uint32_t uniq = 0, run_start = 0;
     for (uint32_t i = 1; i <= n; i++) {
         int same = (i < n) && (strcmp(slice[i], slice[run_start]) == 0);
         if (!same) {
             memcpy(slice[uniq], slice[run_start], sizeof(sample_t));
-            out_values[uniq] = (int64_t)(i - run_start);
+            out_values[uniq] = (int64_t)(i - run_start) * per;
             uniq++; run_start = i;
         }
     }
@@ -345,14 +398,20 @@ static void *push_cpu(void *arg) {
         for (int i = 0; i < g_interval && !g_push_stop; i++) sleep(1);
         if (g_push_stop) break;
 
-        pthread_mutex_lock(&buf_mutex);
-        uint32_t n = active_count;
-        sample_t *tmp = active_buf; active_buf = drain_buf; drain_buf = tmp;
-        active_count = 0;
-        pthread_mutex_unlock(&buf_mutex);
+        /* Drain the SPSC ring [tail, head) under g_drain_mutex so the PHP API
+         * funcs (folded/dump/reset) don't race us on tail. The signal handler
+         * is unaffected — it only advances head. */
+        pthread_mutex_lock(&g_drain_mutex);
+        uint32_t h = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
+        uint32_t t = __atomic_load_n(&g_tail, __ATOMIC_RELAXED);
+        uint32_t n = h - t;
+        if (n > BUF_SIZE) n = BUF_SIZE;
+        if (n == 0) { pthread_mutex_unlock(&g_drain_mutex); continue; }
+        for (uint32_t i = 0; i < n; i++)
+            memcpy(merge_buf[i], g_ring[(t + i) % BUF_SIZE], sizeof(sample_t));
+        __atomic_store_n(&g_tail, t + n, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&g_drain_mutex);
 
-        if (n == 0) continue;
-        memcpy(merge_buf, drain_buf, n * sizeof(sample_t));
         uint32_t uniq = merge_cpu(merge_buf, n, merge_vals);
         if (uniq == 0) continue;
 
@@ -369,31 +428,39 @@ static void *push_cpu(void *arg) {
     return NULL;
 }
 
-/* ponytail: prefork safety. pthreads do not survive fork() — FPM/Swoole master
- * loads the extension (MINIT spawns the push thread) then forks workers. Without
- * this, the worker has no push thread → "one push at startup, then silence".
- * prepare: lock so fork doesn't catch the mutex held by the (vanishing) thread.
- * child:   mutex is locked-by-prepare but its owner is gone; reinit clears it,
- *          drop the parent's stale samples, restart the push thread. */
-static void push_atfork_prepare(void) { pthread_mutex_lock(&buf_mutex); }
-static void push_atfork_parent(void)  { pthread_mutex_unlock(&buf_mutex); }
+/* ponytail: prefork safety. pthreads, itimer, AND sigaction all die across
+ * fork() — FPM/Swoole master loads the extension (MINIT starts sampling + push
+ * thread) then forks workers. Without this the worker has no timer, no handler,
+ * no push thread → "one push at startup, then silence".
+ * prepare: lock g_drain_mutex so fork doesn't catch it held by the vanishing push thread.
+ * child:   reinit the mutex (prepare left it locked, owner gone), reset the ring,
+ *          reinstall the sampler, restart the push thread. */
+static void push_atfork_prepare(void) { pthread_mutex_lock(&g_drain_mutex); }
+static void push_atfork_parent(void)  { pthread_mutex_unlock(&g_drain_mutex); }
 static void push_atfork_child(void) {
-    pthread_mutex_init(&buf_mutex, NULL);
-    active_count = 0;
+    pthread_mutex_init(&g_drain_mutex, NULL);
+    __atomic_store_n(&g_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_tail, 0, __ATOMIC_RELAXED);
     g_push_stop = 0;
+    install_sampler();
+    if (g_enabled) sampling_start();
     if (g_app_name) pthread_create(&g_push_thread, NULL, push_cpu, NULL);
 }
 
 /* ── PHP API ───────────────────────────────────────────────────────── */
 
 PHP_FUNCTION(pyroscope_php_folded) {
-    pthread_mutex_lock(&buf_mutex);
-    uint32_t n = active_count;
-    if (n == 0) { pthread_mutex_unlock(&buf_mutex); RETURN_EMPTY_ARRAY(); }
+    pthread_mutex_lock(&g_drain_mutex);
+    uint32_t h = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
+    uint32_t t = __atomic_load_n(&g_tail, __ATOMIC_RELAXED);
+    uint32_t n = h - t;
+    if (n > BUF_SIZE) n = BUF_SIZE;
+    if (n == 0) { pthread_mutex_unlock(&g_drain_mutex); RETURN_EMPTY_ARRAY(); }
     sample_t *slice = malloc(n * sizeof(sample_t));
-    if (!slice) { pthread_mutex_unlock(&buf_mutex); RETURN_EMPTY_ARRAY(); }
-    memcpy(slice, active_buf, n * sizeof(sample_t));
-    pthread_mutex_unlock(&buf_mutex);
+    if (!slice) { pthread_mutex_unlock(&g_drain_mutex); RETURN_EMPTY_ARRAY(); }
+    for (uint32_t i = 0; i < n; i++)
+        memcpy(slice[i], g_ring[(t + i) % BUF_SIZE], sizeof(sample_t));
+    pthread_mutex_unlock(&g_drain_mutex);   /* read-only snapshot, don't advance tail */
 
     qsort(slice, n, sizeof(sample_t), sample_cmp);
     array_init(return_value);
@@ -413,24 +480,32 @@ PHP_FUNCTION(pyroscope_php_folded) {
 }
 
 PHP_FUNCTION(pyroscope_php_dump) {
-    pthread_mutex_lock(&buf_mutex);
-    uint32_t n = active_count;
-    if (n == 0) { pthread_mutex_unlock(&buf_mutex); RETURN_EMPTY_ARRAY(); }
+    pthread_mutex_lock(&g_drain_mutex);
+    uint32_t h = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
+    uint32_t t = __atomic_load_n(&g_tail, __ATOMIC_RELAXED);
+    uint32_t n = h - t;
+    if (n > BUF_SIZE) n = BUF_SIZE;
+    if (n == 0) { pthread_mutex_unlock(&g_drain_mutex); RETURN_EMPTY_ARRAY(); }
     sample_t *s = malloc(n * sizeof(sample_t));
-    if (!s) { pthread_mutex_unlock(&buf_mutex); RETURN_EMPTY_ARRAY(); }
-    memcpy(s, active_buf, n * sizeof(sample_t));
-    pthread_mutex_unlock(&buf_mutex);
+    if (!s) { pthread_mutex_unlock(&g_drain_mutex); RETURN_EMPTY_ARRAY(); }
+    for (uint32_t i = 0; i < n; i++)
+        memcpy(s[i], g_ring[(t + i) % BUF_SIZE], sizeof(sample_t));
+    pthread_mutex_unlock(&g_drain_mutex);
     array_init(return_value);
     for (uint32_t i = 0; i < n; i++) add_next_index_string(return_value, s[i]);
     free(s);
 }
 
 PHP_FUNCTION(pyroscope_php_reset) {
-    pthread_mutex_lock(&buf_mutex); active_count = 0; pthread_mutex_unlock(&buf_mutex);
+    pthread_mutex_lock(&g_drain_mutex);
+    uint32_t h = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&g_tail, h, __ATOMIC_RELEASE);   /* drop all unconsumed samples */
+    pthread_mutex_unlock(&g_drain_mutex);
 }
 PHP_FUNCTION(pyroscope_php_count) {
-    pthread_mutex_lock(&buf_mutex); uint32_t n = active_count; pthread_mutex_unlock(&buf_mutex);
-    RETURN_LONG(n);
+    uint32_t h = __atomic_load_n(&g_head, __ATOMIC_ACQUIRE);
+    uint32_t t = __atomic_load_n(&g_tail, __ATOMIC_ACQUIRE);
+    RETURN_LONG((int64_t)h - (int64_t)t);
 }
 PHP_FUNCTION(pyroscope_php_buffer_cap) { RETURN_LONG(BUF_SIZE); }
 
@@ -442,6 +517,7 @@ PHP_FUNCTION(pyroscope_php_enable) {
         Z_PARAM_BOOL(enabled)
     ZEND_PARSE_PARAMETERS_END();
     g_enabled = enabled ? 1 : 0;
+    if (g_enabled) sampling_start(); else sampling_stop();
     RETURN_BOOL(g_enabled);
 }
 
@@ -469,11 +545,11 @@ static const zend_function_entry pyroscope_php_functions[] = {
 };
 
 PHP_MINIT_FUNCTION(pyroscope_php) {
-    active_buf = calloc(BUF_SIZE, sizeof(sample_t));
-    drain_buf  = calloc(BUF_SIZE, sizeof(sample_t));
-    if (!active_buf || !drain_buf) {
-        free(active_buf); free(drain_buf);
-        active_buf = drain_buf = NULL;
+    g_ring = calloc(BUF_SIZE, sizeof(sample_t));
+    g_sigstack = malloc((size_t)SIGSTKSZ * 4);
+    if (!g_ring || !g_sigstack) {
+        free(g_ring); free(g_sigstack);
+        g_ring = NULL; g_sigstack = NULL;
         return FAILURE;
     }
 
@@ -483,17 +559,19 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
      * backend (if ALL) or skips it (if NOTHING, breaking HTTPS when we load
      * before the curl ext). If ext-curl is absent, curl_easy_init auto-inits
      * once, safely in the push thread. */
-    orig_execute_ex = zend_execute_ex;
-    zend_execute_ex = cp_execute_ex;
-    active_count = 0;
 
     const char *ep = getenv("PYROSCOPE_ENDPOINT");
     const char *an = getenv("PYROSCOPE_APP_NAME");
     const char *iv = getenv("PYROSCOPE_INTERVAL");
+    const char *su = getenv("PYROSCOPE_SAMPLING_INTERVAL_US");
 
     g_endpoint = strdup(ep ? ep : "http://127.0.0.1:4040");
     if (an) g_app_name = strdup(an);
     if (iv) { long v = atol(iv); if (v > 0 && v <= 3600) g_interval = (int)v; }
+    if (su) { long v = atol(su); if (v >= 1000 && v <= 1000000) g_sample_us = (int)v; }
+
+    install_sampler();
+    if (g_enabled) sampling_start();   /* sample locally even without APP_NAME (folded/dump) */
 
     pthread_atfork(push_atfork_prepare, push_atfork_parent, push_atfork_child);
 
@@ -503,14 +581,14 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
 }
 
 PHP_MSHUTDOWN_FUNCTION(pyroscope_php) {
-    zend_execute_ex = orig_execute_ex;
+    uninstall_sampler();   /* stop itimer + restore SIGVTALRM */
     if (g_app_name) {
         g_push_stop = 1;
         pthread_join(g_push_thread, NULL);
         free(g_app_name);
     }
     free(g_endpoint);
-    free(active_buf); free(drain_buf); pthread_mutex_destroy(&buf_mutex);
+    free(g_ring); free(g_sigstack); pthread_mutex_destroy(&g_drain_mutex);
     /* No curl_global_cleanup — we never owned global libcurl state (see MINIT). */
     return SUCCESS;
 }
