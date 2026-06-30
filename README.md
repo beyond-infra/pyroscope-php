@@ -88,7 +88,7 @@ CPU 模式只计用户态 CPU，**同步阻塞调用**（`sleep()`、同步 curl
 | 指标 | 值 |
 |------|-----|
 | 采样开销 | 每 10ms 一次信号 handler（µs 级），无 per-call 开销 |
-| buffer 常驻 | 256MB（1 × 65536 × 4096B ring）+ sigaltstack |
+| buffer 常驻 | CPU 256MB(65536×4096B) + wall 32MB(8192×4096B) + sigaltstack |
 | 编码依赖 | 无（100 行 wire encoder） |
 | 测试覆盖 | PHP 22 组 + C pprof 编码 + valgrind + 浸泡测试 + wall 集成 |
 ## 兼容
