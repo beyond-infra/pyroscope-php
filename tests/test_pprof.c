@@ -75,7 +75,7 @@ static int str_idx(const char **tab, int *cnt, const char *s) {
 static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
                         const char *stype, const char *sunit,
                         const char *ptype, const char *punit,
-                        char **out, size_t *out_len) {
+                        int64_t period_ns, char **out, size_t *out_len) {
     if (n == 0) { *out = NULL; *out_len = 0; return; }
 
     const char *stab[MAX_STR + 1]; int sc = 0;
@@ -155,8 +155,8 @@ static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
         pb_uint(&pb, 2, (uint64_t)values[i]);
     }
 
-    pb_int(&pb, 9, 0LL);  /* time_nanos — fixed for deterministic test */
-    pb_int(&pb, 10, 10000000LL);  /* period = 10ms sampling interval, matches extension */
+    pb_int(&pb, 9, 0LL - period_ns);  /* time_nanos — fixed for deterministic test */
+    pb_int(&pb, 10, period_ns);
     pb_uint(&pb, 14, 0);
 
     /* string_table(6): [0] must be empty string */
@@ -189,7 +189,7 @@ static void test_basic_cpu(void) {
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 2,
                 "cpu", "nanoseconds", "cpu", "nanoseconds",
-                &pp, &pl);
+                10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "build_pprof returns data");
     TEST(pl > 50, "pprof is reasonable size");
@@ -260,7 +260,7 @@ static void test_alloc_space(void) {
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 2,
                 "alloc_space", "bytes", "space", "bytes",
-                &pp, &pl);
+                10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "build_pprof alloc returns data");
     TEST(pl > 50, "alloc pprof is reasonable size");
@@ -285,9 +285,9 @@ static void test_deterministic(void) {
     char *p1 = NULL, *p2 = NULL;
     size_t l1 = 0, l2 = 0;
     build_pprof(stacks, values, 2,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &p1, &l1);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &p1, &l1);
     build_pprof(stacks, values, 2,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &p2, &l2);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &p2, &l2);
 
     TEST(l1 == l2, "same input → same size");
     TEST(memcmp(p1, p2, l1) == 0, "same input → same bytes");
@@ -299,7 +299,8 @@ static void test_empty(void) {
     printf("\n[4] Empty input\n");
     char *pp = NULL; size_t pl = 0;
     build_pprof(NULL, NULL, 0,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                "cpu", "nanoseconds", "cpu", "nanoseconds",
+                10000000LL, &pp, &pl);
     TEST(pp == NULL, "empty input → NULL");
     TEST(pl == 0, "empty input → zero length");
 }
@@ -312,7 +313,7 @@ static void test_function_name_index(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 1,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "build succeeds");
     if (!pp) return;
@@ -333,7 +334,7 @@ static void test_single_frame(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 1,
-                "samples", "count", "cpu", "nanoseconds", &pp, &pl);
+                "samples", "count", "cpu", "nanoseconds", 10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "single frame succeeds");
     TEST(pl > 30, "reasonable size for 1 sample");
@@ -357,7 +358,7 @@ static void test_deep_stack(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 1,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "deep stack succeeds");
     TEST(pl > 100, "deep stack pprof > 100 bytes");
@@ -373,7 +374,7 @@ static void test_korean_utf8(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 1,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "UTF-8 succeeds");
     /* Verify Korean characters preserved */
@@ -392,7 +393,7 @@ static void test_large_value(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 1,
-                "alloc_space", "bytes", "space", "bytes", &pp, &pl);
+                "alloc_space", "bytes", "space", "bytes", 10000000LL, &pp, &pl);
 
     TEST(pp != NULL, "large value succeeds");
     TEST(pl > 20, "large value pprof > 20 bytes");
@@ -455,7 +456,7 @@ static void test_push(void) {
 
     char *pp = NULL; size_t pl = 0;
     build_pprof(stacks, values, 2,
-                "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                "cpu", "nanoseconds", "cpu", "nanoseconds", 10000000LL, &pp, &pl);
     if (!pp) { printf("  FAIL build_pprof failed\n"); tests_failed++; return; }
 
     int code = push_to_pyroscope("pprof-test-cpu", pp, pl);
@@ -470,7 +471,8 @@ static void test_push(void) {
 
     char *ap = NULL; size_t al = 0;
     build_pprof(astacks, avalues, 2,
-                "alloc_space", "bytes", "space", "bytes", &ap, &al);
+                "alloc_space", "bytes", "space", "bytes",
+                10000000LL, &ap, &al);
     if (ap) {
         int acode = push_to_pyroscope("pprof-test-alloc", ap, al);
         TEST(acode == 200, "pprof alloc push returns 200");

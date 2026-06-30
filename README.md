@@ -90,7 +90,7 @@ CPU 模式只计用户态 CPU，**同步阻塞调用**（`sleep()`、同步 curl
 | 采样开销 | 每 10ms 一次信号 handler（µs 级），无 per-call 开销 |
 | buffer 常驻 | 256MB（1 × 65536 × 4096B ring）+ sigaltstack |
 | 编码依赖 | 无（100 行 wire encoder） |
-| 测试覆盖 | PHP 22 组 + C pprof 编码 + valgrind + 浸泡测试 |
+| 测试覆盖 | PHP 22 组 + C pprof 编码 + valgrind + 浸泡测试 + wall 集成 |
 ## 兼容
 
 - PHP 8.0+
@@ -107,7 +107,7 @@ make test-pprof # pprof 编码单元测试
 make docker-demo # Docker 完整环境
 ```
 
-CI 矩阵：PHP 集成 / pprof 编码 / valgrind / 浸泡测试 / push 集成。
+CI 矩阵：PHP 集成 / pprof 编码 / valgrind / 浸泡测试 / push 集成 / wall 集成。
 
 ## License
 

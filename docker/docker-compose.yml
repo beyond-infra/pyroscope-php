@@ -1,12 +1,12 @@
 services:
   pyroscope:
-    image: grafana/pyroscope:latest
+    image: grafana/pyroscope:2.1.0
     ports:
       - "4040:4040"
     command:
-      - "-pyroscopedb.data-path=/data"
-      - "-storage.filesystem.dir=/data/v2/shared"
       - "-log.level=info"
+      - "-storage.backend=filesystem"
+      - "-storage.filesystem.dir=/data"
     volumes:
       - pyroscope-data:/data
 
@@ -20,6 +20,7 @@ services:
       PYROSCOPE_APP_NAME: my-shop-api
       PYROSCOPE_ENDPOINT: http://pyroscope:4040
       PYROSCOPE_INTERVAL: 2
+      PYROSCOPE_WALL: "1"
     depends_on:
       - pyroscope
 

@@ -300,7 +300,7 @@ static int str_idx(const char **tab, int *cnt, int max, const char *s) {
 static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
                         const char *stype, const char *sunit,
                         const char *ptype, const char *punit,
-                        char **out, size_t *out_len) {
+                        int64_t period_ns, char **out, size_t *out_len) {
     if (n == 0) { *out = NULL; *out_len = 0; return; }
 
     /* Estimate frame count upper bound: sum of frames across all samples */
@@ -408,8 +408,8 @@ static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
         pb_int(&pb, 2, values[i]);
     }
 
-    pb_int(&pb, 9, (int64_t)time(NULL) * 1000000000LL - (int64_t)g_sample_us * 1000);
-    pb_int(&pb, 10, (int64_t)g_sample_us * 1000);   /* period = sampling interval (ns) */
+    pb_int(&pb, 9, (int64_t)time(NULL) * 1000000000LL - period_ns);
+    pb_int(&pb, 10, period_ns);   /* period = sampling interval (ns) */
     pb_uint(&pb, 14, 0);
     pb_str(&pb, 6, "", 0);
     for (int i = 0; i < sc; i++)
@@ -518,7 +518,8 @@ static void *push_cpu(void *arg) {
 
         char *pp = NULL; size_t pl = 0;
         build_pprof(merge_buf, merge_vals, uniq,
-                    "cpu", "nanoseconds", "cpu", "nanoseconds", &pp, &pl);
+                    "cpu", "nanoseconds", "cpu", "nanoseconds",
+                    (int64_t)g_sample_us * 1000, &pp, &pl);
         if (!pp) continue;
         int code = push_pprof(g_endpoint, g_app_name, pp, pl);
         if (code != 200 && code != 204)
@@ -563,7 +564,8 @@ static void *push_wall(void *arg) {
          * (wall/nanoseconds vs cpu/nanoseconds) — one app, two metrics. */
         char *pp = NULL; size_t pl = 0;
         build_pprof(merge_buf, merge_vals, uniq,
-                    "wall", "nanoseconds", "wall", "nanoseconds", &pp, &pl);
+                    "wall", "nanoseconds", "wall", "nanoseconds",
+                    (int64_t)g_wall_us * 1000, &pp, &pl);
         if (!pp) continue;
         int code = push_pprof(g_endpoint, g_app_name, pp, pl);
         if (code != 200 && code != 204)
