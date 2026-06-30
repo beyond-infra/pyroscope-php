@@ -369,6 +369,21 @@ static void *push_cpu(void *arg) {
     return NULL;
 }
 
+/* ponytail: prefork safety. pthreads do not survive fork() — FPM/Swoole master
+ * loads the extension (MINIT spawns the push thread) then forks workers. Without
+ * this, the worker has no push thread → "one push at startup, then silence".
+ * prepare: lock so fork doesn't catch the mutex held by the (vanishing) thread.
+ * child:   mutex is locked-by-prepare but its owner is gone; reinit clears it,
+ *          drop the parent's stale samples, restart the push thread. */
+static void push_atfork_prepare(void) { pthread_mutex_lock(&buf_mutex); }
+static void push_atfork_parent(void)  { pthread_mutex_unlock(&buf_mutex); }
+static void push_atfork_child(void) {
+    pthread_mutex_init(&buf_mutex, NULL);
+    active_count = 0;
+    g_push_stop = 0;
+    if (g_app_name) pthread_create(&g_push_thread, NULL, push_cpu, NULL);
+}
+
 /* ── PHP API ───────────────────────────────────────────────────────── */
 
 PHP_FUNCTION(pyroscope_php_folded) {
@@ -479,6 +494,8 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
     g_endpoint = strdup(ep ? ep : "http://127.0.0.1:4040");
     if (an) g_app_name = strdup(an);
     if (iv) { long v = atol(iv); if (v > 0 && v <= 3600) g_interval = (int)v; }
+
+    pthread_atfork(push_atfork_prepare, push_atfork_parent, push_atfork_child);
 
     if (g_app_name && pthread_create(&g_push_thread, NULL, push_cpu, NULL) != 0)
         free(g_app_name), g_app_name = NULL;  /* ponytail: create failed → skip push, don't join garbage tid */
