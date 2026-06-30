@@ -35,23 +35,50 @@ static pthread_t g_push_thread;
 static int       g_push_stop = 0;
 
 static void walk_stack(zend_execute_data *ex, char *out, size_t out_sz) {
-    const char *parts[MAX_DEPTH];
-    size_t lens[MAX_DEPTH];
+    /* Per frame we may emit up to 3 segments: [class][sep][funcname].
+     * PHP stores a method's class separately in f->common.scope, so using only
+     * function_name drops the class/namespace for methods (functions and closures
+     * are already self-qualified in function_name). */
+    const char *seg[MAX_DEPTH][3];
+    size_t      len[MAX_DEPTH][3];
+    int         ns[MAX_DEPTH];
     int d = 0;
     while (ex && d < MAX_DEPTH) {
         zend_function *f = ex->func;
         if (f && f->common.function_name) {
-            parts[d] = ZSTR_VAL(f->common.function_name);
-            lens[d] = ZSTR_LEN(f->common.function_name);
+            int s = 0;
+            zend_class_entry *scope = f->common.scope;
+            if (scope && !(f->common.fn_flags & ZEND_ACC_CLOSURE)) {
+                seg[d][s] = ZSTR_VAL(scope->name);
+                len[d][s] = ZSTR_LEN(scope->name);
+                s++;
+                /* ponytail: :: for static, -> for instance — phpspy convention,
+                 * keeps the call-flavor distinction visible in the flamegraph. */
+                if (f->common.fn_flags & ZEND_ACC_STATIC) {
+                    seg[d][s] = "::"; len[d][s] = 2;
+                } else {
+                    seg[d][s] = "->"; len[d][s] = 2;
+                }
+                s++;
+            }
+            seg[d][s] = ZSTR_VAL(f->common.function_name);
+            len[d][s] = ZSTR_LEN(f->common.function_name);
+            s++;
+            ns[d] = s;
             d++;
         }
         ex = ex->prev_execute_data;
     }
     char *p = out, *end = out + out_sz - 1;
     for (int i = d - 1; i >= 0 && p < end; i--) {
+        char *frame_start = p;  /* drop whole frame on truncation, not half */
         if (i < d - 1) { *p++ = ';'; }
-        if (p + lens[i] >= end) break;
-        memcpy(p, parts[i], lens[i]); p += lens[i];
+        int s;
+        for (s = 0; s < ns[i]; s++) {
+            if (p + len[i][s] >= end) break;
+            memcpy(p, seg[i][s], len[i][s]); p += len[i][s];
+        }
+        if (s < ns[i]) { p = frame_start; break; }  /* frame didn't fit whole */
     }
     *p = '\0';
 }
