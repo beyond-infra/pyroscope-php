@@ -34,6 +34,8 @@ php server.php
 | `PYROSCOPE_ENDPOINT` | 否 | `http://127.0.0.1:4040` | Pyroscope 地址 |
 | `PYROSCOPE_INTERVAL` | 否 | `10` | 推送间隔，秒（1–3600） |
 | `PYROSCOPE_SAMPLING_INTERVAL_US` | 否 | `10000` | SIGVTALRM 采样间隔，微秒（1000–1000000） |
+| `PYROSCOPE_WALL` | 否 | `0` | 开启 wall-clock 采样（补同步阻塞盲区），`1` 启用。仅 Linux |
+| `PYROSCOPE_WALL_INTERVAL_US` | 否 | `10000` | wall 采样间隔，微秒（1000–1000000） |
 
 ## API
 
@@ -74,6 +76,12 @@ PHP 主线程              SIGVTALRM 每 10ms            信号 handler
 3. 推送线程每 N 秒 drain ring，合并相同栈（value = 样本数 × 周期 ns），编码 pprof protobuf，HTTP POST
 
 `ITIMER_VIRTUAL`/`SIGVTALRM` 不被 PHP（`SIGPROF`/max_execution_time）或 Swoole（`SIGALRM`/timer）占用，只计用户态 CPU。FPM/Swoole prefork 后 worker 经 `pthread_atfork` 重装采样器 + 重启推送线程。
+
+### wall-clock 模式（可选，`PYROSCOPE_WALL=1`）
+
+CPU 模式只计用户态 CPU，**同步阻塞调用**（`sleep()`、同步 curl、阻塞 mysql）在 Swoole 协程里会卡死整个 worker 却不耗 CPU——火焰图上一片空白，正是盲区。开启 wall 模式后，第二路采样按真实时间触发（`timer_create` + `CLOCK_REALTIME` + 实时信号 `SIGRTMIN+8`），进程阻塞在 syscall 时信号仍会打断并采集栈。在 Swoole 协作式单线程下语义干净：正常的异步等待（`Coroutine::sleep`、协程化 curl）经 epoll 挂起、worker 跑别的，信号打不到它们；只有真把 worker 卡住的同步阻塞会反复落在同一栈上，火焰图一条粗柱子直接定位。
+
+两路独立 ring + 独立推送线程，推到**同一个 app 名**，Pyroscope 按 `sample_type`（`cpu` vs `wall`）区分——一个应用两个指标，UI 切换查看。代价：开启后每个 worker 多 256MB 常驻 ring；仅 Linux（macOS/BSD 实时信号语义弱）。
 
 ## 指标
 

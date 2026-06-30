@@ -110,3 +110,29 @@ jobs:
           else
             echo "FAIL: mock received no data" && exit 1
           fi
+
+  wall:
+    # wall-clock sampling (PYROSCOPE_WALL=1) catches sync blocking calls that
+    # the CPU sampler (ITIMER_VIRTUAL) cannot — the Swoole sync-block blind spot.
+    runs-on: ubuntu-latest
+    container:
+      image: php:8.3-cli
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: apt-get update && apt-get install -y libcurl4-openssl-dev autoconf gcc make
+      - name: Build extension
+        run: cd extension && phpize && ./configure --enable-pyroscope-php && make -j$(nproc)
+      - name: Install
+        run: |
+          cp extension/modules/pyroscope_php.so $(php -r 'echo ini_get("extension_dir");')/
+          echo "extension=pyroscope_php.so" > /usr/local/etc/php/conf.d/pyroscope_php.ini
+      - name: wall-clock test
+        run: |
+          php tests/mock_ingest.php 4040 /tmp &
+          sleep 1
+          PYROSCOPE_APP_NAME=wallt PYROSCOPE_ENDPOINT=http://127.0.0.1:4040 \
+            PYROSCOPE_INTERVAL=1 PYROSCOPE_WALL=1 timeout 9 php tests/wall_test.php
+          sleep 1
+          grep -a -q sync_block /tmp/ingest.wall.bin   # wall sees the blocking call
+          ! grep -a -q sync_block /tmp/ingest.cpu.bin  # cpu blind spot confirmed

@@ -12,6 +12,8 @@
  *   PYROSCOPE_ENDPOINT=http://pyroscope:4040  (default http://127.0.0.1:4040)
  *   PYROSCOPE_INTERVAL=10              (push interval, seconds, default 10)
  *   PYROSCOPE_SAMPLING_INTERVAL_US=10000  (SIGVTALRM sampling interval, microseconds, default 10000)
+ *   PYROSCOPE_WALL=0                       (enable wall-clock sampling for sync-block blind spot, Linux only)
+ *   PYROSCOPE_WALL_INTERVAL_US=10000       (wall sampling interval, microseconds, default 10000)
  *
  * Endpoints:
  *   GET /health
