@@ -5,12 +5,13 @@
  * Architecture: Router → Controller → Service → Repository → Helper
  *
  * Profiling is zero-code: just load the extension + set env vars.
- * The extension hooks zend_execute_ex and pushes to Pyroscope on a background thread.
+ * The extension samples the PHP stack via a SIGVTALRM timer and pushes to Pyroscope on a background thread.
  *
  * Env vars:
  *   PYROSCOPE_APP_NAME=my-shop-api     (required to enable auto-push)
  *   PYROSCOPE_ENDPOINT=http://pyroscope:4040  (default http://127.0.0.1:4040)
- *   PYROSCOPE_INTERVAL=10              (seconds, default 10)
+ *   PYROSCOPE_INTERVAL=10              (push interval, seconds, default 10)
+ *   PYROSCOPE_SAMPLING_INTERVAL_US=10000  (SIGVTALRM sampling interval, microseconds, default 10000)
  *
  * Endpoints:
  *   GET /health

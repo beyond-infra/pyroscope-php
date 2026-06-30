@@ -33,6 +33,7 @@ php server.php
 | `PYROSCOPE_APP_NAME` | 是 | — | Pyroscope app name |
 | `PYROSCOPE_ENDPOINT` | 否 | `http://127.0.0.1:4040` | Pyroscope 地址 |
 | `PYROSCOPE_INTERVAL` | 否 | `10` | 推送间隔，秒（1–3600） |
+| `PYROSCOPE_SAMPLING_INTERVAL_US` | 否 | `10000` | SIGVTALRM 采样间隔，微秒（1000–1000000） |
 
 ## API
 
@@ -59,31 +60,29 @@ php server.php
 ## 原理
 
 ```
-┌──────────────────────┐
-│ PHP request thread   │
-│ zend_execute_ex →    │
-│   walk_stack →       │   swap under mutex    ┌──────────────────┐
-│   write active_buf   │◄────────────────────►│ push thread      │
-│   (65536 × 4096B)    │      every N sec       │ merge + pprof    │
-│                      │                        │ encode + POST    │
-│ active_count++       │                        │ /ingest?name=app │
-└──────────────────────┘                        │ &format=pprof    │
-                                                └──────────────────┘
+PHP 主线程              SIGVTALRM 每 10ms            信号 handler
+业务代码执行中  ────────────────────────▶  walk_stack EG(current_execute_data)
+                                         写 g_ring[head++]  (lock-free SPSC, 满→丢)
+                                                    │
+                                                    ▼  push 线程每 N 秒 drain
+                                         push thread: merge + pprof + POST
+                                         /ingest?name=app&format=pprof
 ```
 
-1. `PHP_MINIT` 替换 `zend_execute_ex`，启动后台线程
-2. 每次函数调用通过 `prev_execute_data` 回溯构建 `root;mid;leaf` 栈
-3. 后台线程定时交换 active/drain buffer，合并相同栈，编码 pprof protobuf，HTTP POST
+1. `PHP_MINIT` 装 `SIGVTALRM` handler + `setitimer(ITIMER_VIRTUAL, 10ms)`，起后台推送线程
+2. 每 10ms 信号触发，沿 `EG(current_execute_data)->prev_execute_data` 回溯构建 `root;mid;leaf` 栈，写入 lock-free SPSC ring（满则丢）
+3. 推送线程每 N 秒 drain ring，合并相同栈（value = 样本数 × 周期 ns），编码 pprof protobuf，HTTP POST
+
+`ITIMER_VIRTUAL`/`SIGVTALRM` 不被 PHP（`SIGPROF`/max_execution_time）或 Swoole（`SIGALRM`/timer）占用，只计用户态 CPU。FPM/Swoole prefork 后 worker 经 `pthread_atfork` 重装采样器 + 重启推送线程。
 
 ## 指标
 
 | 指标 | 值 |
 |------|-----|
-| per-call 开销 | ~140ns |
-| buffer 常驻 | 256MB × 2 = 512MB |
+| 采样开销 | 每 10ms 一次信号 handler（µs 级），无 per-call 开销 |
+| buffer 常驻 | 256MB（1 × 65536 × 4096B ring）+ sigaltstack |
 | 编码依赖 | 无（100 行 wire encoder） |
-| 测试覆盖 | PHP 21 组 + C 编码 + 并发模拟 + TLA+ 模型 |
-
+| 测试覆盖 | PHP 22 组 + C pprof 编码 + valgrind + 浸泡测试 |
 ## 兼容
 
 - PHP 8.0+
@@ -97,11 +96,10 @@ php server.php
 make build      # 构建 .so
 make test       # PHP 集成测试
 make test-pprof # pprof 编码单元测试
-make test-sim   # 并发模拟测试
 make docker-demo # Docker 完整环境
 ```
 
-CI 矩阵：PHP 集成 / pprof 编码 / TSan / ASan / UBSan / valgrind / 浸泡测试 / TLA+ 模型校验。
+CI 矩阵：PHP 集成 / pprof 编码 / valgrind / 浸泡测试 / push 集成。
 
 ## License
 

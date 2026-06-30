@@ -25,52 +25,6 @@ jobs:
       - name: Run tests
         run: php tests/rigorous_test.php
 
-  simulation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build simulation (normal)
-        run: gcc -pthread -Wall -Werror -O2 -o tests/sim_bin tests/simulation.c
-      - name: Run deterministic simulation
-        run: |
-          for s in 1 42 12345 99999; do
-            tests/sim_bin --seed $s --fault-mode none || exit 1
-          done
-          tests/sim_bin --seed 42 --fault-mode full-buffer || exit 1
-
-  simulation-tsan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build simulation with TSan
-        run: gcc -pthread -fsanitize=thread -fno-omit-frame-pointer -g -O1 -o tests/sim_tsan tests/simulation.c
-      - name: Run under TSan
-        env:
-          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
-        run: tests/sim_tsan --seed 42 --fault-mode none
-
-  simulation-asan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build simulation with ASan
-        run: gcc -pthread -fsanitize=address -fno-omit-frame-pointer -g -O1 -o tests/sim_asan tests/simulation.c
-      - name: Run under ASan
-        env:
-          ASAN_OPTIONS: "halt_on_error=1"
-        run: tests/sim_asan --seed 42 --fault-mode none
-
-  simulation-ubsan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build simulation with UBSan
-        run: gcc -pthread -fsanitize=undefined -fno-omit-frame-pointer -g -O1 -o tests/sim_ubsan tests/simulation.c
-      - name: Run under UBSan
-        env:
-          UBSAN_OPTIONS: "halt_on_error=1"
-        run: tests/sim_ubsan --seed 42 --fault-mode none
-
   integration:
     runs-on: ubuntu-latest
     container:
@@ -95,18 +49,6 @@ jobs:
             echo "push test done\n";
             '
           echo "PASS: push-mode integration test"
-
-  tla:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install TLA+ tools
-        run: |
-          wget -q https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar \
-            -O /tmp/tla2tools.jar
-      - name: Run TLC model checker
-        run: |
-          java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock tla/PyroscopeBuffer.tla
 
   pprof-tests:
     runs-on: ubuntu-latest

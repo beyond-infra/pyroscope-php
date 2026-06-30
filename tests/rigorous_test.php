@@ -2,7 +2,7 @@
 /**
  * Rigorous test suite for pyroscope_php extension.
  *
- * Sampling is SIGPROF timer-based (CPU sampling), NOT call-boundary. Tests must
+ * Sampling is SIGVTALRM timer-based (CPU sampling), NOT call-boundary. Tests must
  * burn CPU long enough for the timer to fire (~tens of ms). Counts are sample
  * counts, not call counts — assertions check stack structure and presence, not
  * exact multiplicities.
@@ -21,7 +21,7 @@ function chk(bool $c, string $m, string $d = ''): void { $c ? ok($m) : no($m, $d
 function info(string $m): void { global $OUT, $pass; fprintf($OUT, "  INFO  %s\n", $m); $pass++; }
 function skip(string $m): void { global $OUT, $skip; fprintf($OUT, "  SKIP  %s\n", $m); $skip++; }
 
-// Burn CPU for ~$s seconds with NO function calls inside the loop, so SIGPROF
+// Burn CPU for ~$s seconds with NO function calls inside the loop, so SIGVTALRM
 // fires while the burner's own frame is on top — keeping the captured stack
 // exactly the caller chain (no builtin frame appended).
 function _burn(float $s): void {

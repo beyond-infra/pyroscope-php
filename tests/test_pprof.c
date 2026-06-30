@@ -156,7 +156,7 @@ static void build_pprof(sample_t *samples, int64_t *values, uint32_t n,
     }
 
     pb_int(&pb, 9, 0LL);  /* time_nanos — fixed for deterministic test */
-    pb_int(&pb, 10, 10000000000LL);
+    pb_int(&pb, 10, 10000000LL);  /* period = 10ms sampling interval, matches extension */
     pb_uint(&pb, 14, 0);
 
     /* string_table(6): [0] must be empty string */
