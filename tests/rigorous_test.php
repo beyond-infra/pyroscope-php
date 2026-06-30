@@ -89,6 +89,9 @@ if ($anon) { ok('closure captured'); } else { info('closure under internal name'
 // ── 5. Coroutine concurrent sampling ──
 fprintf($OUT, "\n[5] Coroutine sampling\n");
 pyroscope_php_reset();
+if (!extension_loaded('swoole')) {
+    info('SKIP — Swoole not installed');
+} else {
 Swoole\Coroutine\run(function () {
     $wg = new Swoole\Coroutine\WaitGroup();
     $wg->add(); Swoole\Coroutine::create(function () use ($wg) { _coA(); $wg->done(); });
@@ -99,6 +102,7 @@ Swoole\Coroutine\run(function () {
 $dump = pyroscope_php_dump();
 $stacks = array_unique($dump);
 chk(count($stacks) >= 1, 'coroutines produce stack samples');
+}
 
 // ── 6. Reset ──
 fprintf($OUT, "\n[6] Reset\n");
@@ -160,6 +164,9 @@ chk($ns < 10000 || $samples === 0, 'overhead < 10µs', sprintf('%.0f ns', $ns));
 // ── 12. Concurrent burst ──
 fprintf($OUT, "\n[12] Concurrent burst\n");
 pyroscope_php_reset();
+if (!extension_loaded('swoole')) {
+    info('SKIP — Swoole not installed');
+} else {
 Swoole\Coroutine\run(function () {
     $wg = new Swoole\Coroutine\WaitGroup();
     for ($i = 0; $i < 50; $i++) {
@@ -172,6 +179,7 @@ Swoole\Coroutine\run(function () {
     $wg->wait();
 });
 chk(pyroscope_php_count() > 500, '50 coro × 20 calls captured');
+}
 
 // ── 13. Empty buffer safety ──
 fprintf($OUT, "\n[13] Empty buffer\n");

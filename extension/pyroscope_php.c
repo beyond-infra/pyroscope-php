@@ -58,13 +58,17 @@ static void walk_stack(zend_execute_data *ex, char *out, size_t out_sz) {
 
 static void cp_execute_ex(zend_execute_data *execute_data) {
     zend_function *f = EX(func);
-    if (!(f && f->common.function_name && g_enabled)) return;
-    pthread_mutex_lock(&buf_mutex);
-    if (active_count < BUF_SIZE) {
-        walk_stack(execute_data, active_buf[active_count], MAX_STACK_LEN);
-        active_count++;
+    /* ponytail: always run the original executor — frames without a function
+     * name (main script, include/eval) must still execute, only profiling is
+     * skipped. Returning early here used to swallow all top-level code. */
+    if (f && f->common.function_name && g_enabled) {
+        pthread_mutex_lock(&buf_mutex);
+        if (active_count < BUF_SIZE) {
+            walk_stack(execute_data, active_buf[active_count], MAX_STACK_LEN);
+            active_count++;
+        }
+        pthread_mutex_unlock(&buf_mutex);
     }
-    pthread_mutex_unlock(&buf_mutex);
     orig_execute_ex(execute_data);
 }
 
@@ -431,7 +435,10 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
         return FAILURE;
     }
 
-    curl_global_init(CURL_GLOBAL_ALL);
+    /* ponytail: CURL_GLOBAL_NOTHING, not ALL. PHP's curl extension already
+     * initialized the SSL backend; re-init here clobbers PHP CLI's stdout/stderr
+     * handles, silently suppressing all script output. */
+    curl_global_init(CURL_GLOBAL_NOTHING);
     orig_execute_ex = zend_execute_ex;
     zend_execute_ex = cp_execute_ex;
     active_count = 0;
