@@ -4,17 +4,18 @@
  *
  * Run WITHOUT PYROSCOPE_APP_NAME to keep push thread off.
  * With APP_NAME set, overflow test auto-skips (push thread drains buffer).
- * Output goes to stderr when PHP CLI is present, to work around
- * curl_global_init stdout suppression in some environments.
+ * Output goes to stderr (STDERR) so it is visible even if a loaded
+ * extension suppresses the CLI SAPI stdout handles.
  */
 declare(strict_types=1);
 
-$pass = 0; $fail = 0;
+$pass = 0; $fail = 0; $skip = 0;
 $OUT = defined('STDERR') ? STDERR : STDOUT;
 function ok(string $m): void { global $pass, $OUT; fprintf($OUT, "  PASS  %s\n", $m); $pass++; }
 function no(string $m, string $d = ''): void { global $fail, $OUT; fprintf($OUT, "  FAIL  %s%s\n", $m, $d ? ": $d" : ""); $fail++; }
 function chk(bool $c, string $m, string $d = ''): void { $c ? ok($m) : no($m, $d); }
 function info(string $m): void { global $OUT, $pass; fprintf($OUT, "  INFO  %s\n", $m); $pass++; }
+function skip(string $m): void { global $OUT, $skip; fprintf($OUT, "  SKIP  %s\n", $m); $skip++; }
 
 // Pre-declare to avoid redeclare in loops. Must call a built-in (sqrt) to ensure hook fires.
 function _t1_a() { sqrt(4.0); }
@@ -90,7 +91,7 @@ if ($anon) { ok('closure captured'); } else { info('closure under internal name'
 fprintf($OUT, "\n[5] Coroutine sampling\n");
 pyroscope_php_reset();
 if (!extension_loaded('swoole')) {
-    info('SKIP — Swoole not installed');
+    skip('Swoole not installed');
 } else {
 Swoole\Coroutine\run(function () {
     $wg = new Swoole\Coroutine\WaitGroup();
@@ -165,7 +166,7 @@ chk($ns < 10000 || $samples === 0, 'overhead < 10µs', sprintf('%.0f ns', $ns));
 fprintf($OUT, "\n[12] Concurrent burst\n");
 pyroscope_php_reset();
 if (!extension_loaded('swoole')) {
-    info('SKIP — Swoole not installed');
+    skip('Swoole not installed');
 } else {
 Swoole\Coroutine\run(function () {
     $wg = new Swoole\Coroutine\WaitGroup();
@@ -259,5 +260,5 @@ _t21_deep(200); // exceeds MAX_DEPTH=128
 chk(pyroscope_php_count() > 0, 'deep stack survives max depth');
 
 fprintf($OUT, "\n" . str_repeat('=', 60) . "\n");
-fprintf($OUT, "Results: %d passed, %d failed, %d total\n", $pass, $fail, $pass + $fail);
+fprintf($OUT, "Results: %d passed, %d skipped, %d failed, %d total\n", $pass, $skip, $fail, $pass + $skip + $fail);
 exit($fail > 0 ? 1 : 0);

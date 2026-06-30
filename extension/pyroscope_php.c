@@ -435,10 +435,12 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
         return FAILURE;
     }
 
-    /* ponytail: CURL_GLOBAL_NOTHING, not ALL. PHP's curl extension already
-     * initialized the SSL backend; re-init here clobbers PHP CLI's stdout/stderr
-     * handles, silently suppressing all script output. */
-    curl_global_init(CURL_GLOBAL_NOTHING);
+    /* No curl_global_init here. PHP's curl extension owns global libcurl state
+     * (it calls curl_global_init in its own MINIT); our calling it again — even
+     * with CURL_GLOBAL_NOTHING — is first-call-wins and either clobbers the SSL
+     * backend (if ALL) or skips it (if NOTHING, breaking HTTPS when we load
+     * before the curl ext). If ext-curl is absent, curl_easy_init auto-inits
+     * once, safely in the push thread. */
     orig_execute_ex = zend_execute_ex;
     zend_execute_ex = cp_execute_ex;
     active_count = 0;
@@ -465,7 +467,7 @@ PHP_MSHUTDOWN_FUNCTION(pyroscope_php) {
     }
     free(g_endpoint);
     free(active_buf); free(drain_buf); pthread_mutex_destroy(&buf_mutex);
-    curl_global_cleanup();
+    /* No curl_global_cleanup — we never owned global libcurl state (see MINIT). */
     return SUCCESS;
 }
 
