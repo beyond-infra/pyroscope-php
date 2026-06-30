@@ -1,9 +1,0 @@
--include pyroscope_php.dep
-pyroscope_php.lo: /workspace/beyond-infra/pyroscope-php/extension/pyroscope_php.c
-	$(LIBTOOL) --tag=CC --mode=compile $(CC) -I. -I/workspace/beyond-infra/pyroscope-php/extension $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS)   -DZEND_COMPILE_DL_EXT=1 -c /workspace/beyond-infra/pyroscope-php/extension/pyroscope_php.c -o pyroscope_php.lo  -MMD -MF pyroscope_php.dep -MT pyroscope_php.lo
-$(phplibdir)/pyroscope_php.la: ./pyroscope_php.la
-	$(LIBTOOL) --tag=CC --mode=install cp ./pyroscope_php.la $(phplibdir)
-
-./pyroscope_php.la: $(shared_objects_pyroscope_php) $(PYROSCOPE_PHP_SHARED_DEPENDENCIES)
-	$(LIBTOOL) --tag=CC --mode=link $(CC) -shared $(COMMON_FLAGS) $(CFLAGS_CLEAN) $(EXTRA_CFLAGS) $(LDFLAGS)  -o $@ -export-dynamic -avoid-version -prefer-pic -module -rpath $(phplibdir) $(EXTRA_LDFLAGS) $(shared_objects_pyroscope_php) $(PYROSCOPE_PHP_SHARED_LIBADD)
-

@@ -3,6 +3,10 @@ extension/coro_profiler.so
 *.la
 *.o
 Makefile
+Makefile.fragments
+Makefile.objects
+configure.ac
+*.dep
 config.h*
 config.nice
 configure
