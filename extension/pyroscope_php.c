@@ -16,6 +16,10 @@
 #include <curl/curl.h>
 
 #define BUF_SIZE 65536
+#define BUF_SIZE_WALL 8192  /* ponytail: wall ring is 32MB vs cpu's 256MB —
+                              * wall 10ms sampling × 10s push = 1000 samples
+                              * max between drains; 8192 slots = 80s buffer,
+                              * far above any realistic push-thread stall. */
 #define MAX_DEPTH 128
 #define MAX_STACK_LEN 4096
 
@@ -188,8 +192,8 @@ static void wall_handler(int sig) {
     (void)sig;
     uint32_t h = __atomic_load_n(&g_wall_head, __ATOMIC_RELAXED);
     uint32_t t = __atomic_load_n(&g_wall_tail, __ATOMIC_ACQUIRE);
-    if (h - t >= BUF_SIZE) return;
-    walk_stack(EG(current_execute_data), g_ring_wall[h % BUF_SIZE], MAX_STACK_LEN);
+    if (h - t >= BUF_SIZE_WALL) return;
+    walk_stack(EG(current_execute_data), g_ring_wall[h % BUF_SIZE_WALL], MAX_STACK_LEN);
     __atomic_store_n(&g_wall_head, h + 1, __ATOMIC_RELEASE);
 }
 
@@ -536,8 +540,8 @@ static void *push_cpu(void *arg) {
 static void *push_wall(void *arg) {
     (void)arg; sig_block(); SETNAME("pyroscope_push_wall");
 
-    sample_t *merge_buf = malloc(BUF_SIZE * sizeof(sample_t));
-    int64_t  *merge_vals = malloc(BUF_SIZE * sizeof(int64_t));
+    sample_t *merge_buf = malloc(BUF_SIZE_WALL * sizeof(sample_t));
+    int64_t  *merge_vals = malloc(BUF_SIZE_WALL * sizeof(int64_t));
     if (!merge_buf || !merge_vals) { free(merge_buf); free(merge_vals); return NULL; }
 
     int64_t per = (int64_t)g_wall_us * 1000;
@@ -550,10 +554,10 @@ static void *push_wall(void *arg) {
         uint32_t h = __atomic_load_n(&g_wall_head, __ATOMIC_ACQUIRE);
         uint32_t t = __atomic_load_n(&g_wall_tail, __ATOMIC_RELAXED);
         uint32_t n = h - t;
-        if (n > BUF_SIZE) n = BUF_SIZE;
+        if (n > BUF_SIZE_WALL) n = BUF_SIZE_WALL;
         if (n == 0) { pthread_mutex_unlock(&g_drain_mutex); continue; }
         for (uint32_t i = 0; i < n; i++)
-            memcpy(merge_buf[i], g_ring_wall[(t + i) % BUF_SIZE], sizeof(sample_t));
+            memcpy(merge_buf[i], g_ring_wall[(t + i) % BUF_SIZE_WALL], sizeof(sample_t));
         __atomic_store_n(&g_wall_tail, t + n, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&g_drain_mutex);
 
@@ -718,7 +722,7 @@ PHP_MINIT_FUNCTION(pyroscope_php) {
 
     if (wl && (wl[0] == '1' || wl[0] == 't' || wl[0] == 'T')) {
         g_wall_enabled = 1;
-        g_ring_wall = calloc(BUF_SIZE, sizeof(sample_t));
+        g_ring_wall = calloc(BUF_SIZE_WALL, sizeof(sample_t));
         if (!g_ring_wall) { g_wall_enabled = 0; }
     }
     if (wiv) { long v = atol(wiv); if (v >= 1000 && v <= 1000000) g_wall_us = (int)v; }
